@@ -2,26 +2,28 @@ from pprint import pprint
 from PIL import Image
 import os
 import io
-import base64
+import csv
 import requests
 import tempfile
+import json
 from collections import Counter
 
 _fields_ = "&fields=title,artistname,inventorynumber,uniqueid,objecttype,dimensions"
 _url_ = f"https://api.collectorsystems.com/11184/objects?limit=100{_fields_}&pretty=1"
 _objectsList_ = []
-objCounter = Counter(numObj=0)
+assetCounter = Counter({'attempted': 0, 'downloaded': 0})
 
 
 def getImgLink(objId):
     return f"https://api.collectorsystems.com/11184/objects/{objId}/mainimage"
 
+
 def parseCollectorSystemsObjects(objList):
     for obj in objList:
-        objCounter['numObj'] += 1
+        assetCounter.update(attempted=1)
         csObj = {}
-        # check if dimensions key exists and if object type is not a sculpture
         try:
+            # check if dimensions key exists and if object type is not a sculpture
             if 'dimensions' in dict.keys(obj) and obj['objecttype'] != 'Sculpture':
                 dimensions = obj['dimensions'][0]
                 csObj['width_inches'] = dimensions['widthimperial'] if 'widthimperial' in dict.keys(dimensions) else None
@@ -37,37 +39,32 @@ def downloadImage(imgUrl, objId):
     buffer = tempfile.SpooledTemporaryFile(max_size=1e9)
     response = requests.get(f'{imgUrl}?size=detail', stream=True)
     if response.status_code == 200:
-        dwnld = 0
+        downloaded = 0
         filesize = int(response.headers['content-length'])
         for c in response.iter_content():
-            dwnld += len(c)
+            downloaded += len(c)
             buffer.write(c)
-            print(f'{int((dwnld/filesize)*100)}%')
+            printProgress(objId, downloaded, filesize)
+        print()
         buffer.seek(0)
         i = Image.open(io.BytesIO(buffer.read()))
-        savePath = os.path.join('./image', f'{objId}.png')
+        savePath = os.path.join('./artwork_images', f'{objId}.png')
         i.save(savePath)
-        getDominantImageColors(savePath)
+        assetCounter.update(downloaded=1)
 
 
-def getDominantImageColors(imgPath):
-    url = "https://apicloud-colortag.p.rapidapi.com/tag-file.json"
-    apiKey = open('./apikey.txt', 'r').readlines()[0]
-    image = getImageByteString(imgPath).decode('utf-8')
-    print(image)
-    payload = f'palette=simple&sort=relevance&image="{image}"'
+def getDominantImageColors(objId):
+    url = "https://apicloud-colortag.p.rapidapi.com/tag-url.json"
+    link = getImgLink(objId)
+    querystring = {"palette": "simple", "sort": "weight", "url": link}
     headers = {
         'x-rapidapi-host': "apicloud-colortag.p.rapidapi.com",
-        'x-rapidapi-key': apiKey,
-        'content-type': "application/x-www-form-urlencoded; charset=UTF-8"
+        'x-rapidapi-key': "5RSRfxBxOMmshPiD70U5zHT91QNep1FDbywjsnPeF31sPOtTFg"
     }
-
-    response = requests.request("POST", url, data=payload, headers=headers)
-    if response.status_code != 200:
-        print(f"an error happened. status code: {response.status_code}")
-    else:
-        print("Successful request")
-    print(response.text)
+    try:
+        return requests.request("GET", url, headers=headers, params=querystring).json()['tags'][:3]
+    except json.decoder.JSONDecodeError:
+        return None
 
 
 def initializeRemainingValues(targetObject, responseObj):
@@ -78,13 +75,7 @@ def initializeRemainingValues(targetObject, responseObj):
     targetObject['unique_id'] = responseObj['uniqueid']
     targetObject['artist'] = responseObj['artistname']
     targetObject['img_link'] = getImgLink(targetObject['object_id'])
-
-
-def getImageByteString(imgPath):
-    # with open(imgPath, 'rb') as image:
-    #     return base64.b64encode(image.read()).decode('utf-8')
-    with open(imgPath, "rb") as image_file:
-        return base64.b64encode(image_file.read())
+    targetObject['color_tags'] = getDominantImageColors(targetObject['object_id'])
 
 
 def beginDataImport():
@@ -92,11 +83,27 @@ def beginDataImport():
     while 'next' in dict.keys(jsonResponse['paging']):
         parseCollectorSystemsObjects(jsonResponse['data'])
         jsonResponse = requests.get(jsonResponse['paging']['next']).json()
-        pprint(jsonResponse)
-        print(f"num objects: {objCounter['numObject']}")
+        printAssetCounts()
+
+
+def printAssetCounts():
+    print(f"\ndownloads attempted: {assetCounter['attempted']}")
+    print(f"downloads succeeded: {assetCounter['downloaded']}\n")
+
+
+def printProgress(objId, downloaded, filesize):
+    progress = int((downloaded / filesize) * 100)
+    isDone = progress == 100
+    msg = f'downloading image: {objId}.png  {progress}%'
+    print(f'\r{msg}', end=" \u2713" if isDone else "")
+
+
+#TODO: fix
+def saveImports():
+    with open('./import.json', 'w') as jsonFile:
+        json.dump(_objectsList_, jsonFile)
 
 
 if __name__ == '__main__':
-    getDominantImageColors('./image/379298.png')
-    # beginDataImport()
-    print(objCounter)
+    beginDataImport()
+    saveImports()
